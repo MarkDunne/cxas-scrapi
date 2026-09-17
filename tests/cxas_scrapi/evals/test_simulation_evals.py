@@ -22,6 +22,11 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
+from cxas_scrapi.evals.naturalness import (
+    NaturalnessLabel,
+    NaturalnessResult,
+    parse_naturalness_config,
+)
 from cxas_scrapi.evals.simulation_evals import (
     LLMUserConversation,
     SimulationEvals,
@@ -1751,6 +1756,7 @@ def test_simulation_evals_expectations_only_passing() -> None:
     ]
     mock_conv.current_turn = 1
     mock_conv.get_transcript.return_value = "transcript"
+    mock_conv.naturalness_result = None
 
     with patch.object(evals, "simulate_conversation", return_value=mock_conv):
         res = evals._run_single_simulation_job(
@@ -1785,6 +1791,7 @@ def test_simulation_evals_expectations_only_failing() -> None:
     ]
     mock_conv.current_turn = 1
     mock_conv.get_transcript.return_value = "transcript"
+    mock_conv.naturalness_result = None
 
     with patch.object(evals, "simulate_conversation", return_value=mock_conv):
         res = evals._run_single_simulation_job(
@@ -1816,6 +1823,7 @@ def test_simulation_evals_expectations_only_fallback() -> None:
     mock_conv.expectation_results = []
     mock_conv.current_turn = 1
     mock_conv.get_transcript.return_value = "transcript"
+    mock_conv.naturalness_result = None
 
     with patch.object(evals, "simulate_conversation", return_value=mock_conv):
         res = evals._run_single_simulation_job(
@@ -1949,3 +1957,152 @@ def test_simulation_evals_custom_vertex_location() -> None:
         location="us-central1",
         credentials=simulator.creds,
     )
+
+
+def _naturalness_evals(**kwargs: typing.Any) -> SimulationEvals:
+    app_name = "projects/p/locations/l/apps/a"
+    with (
+        patch("cxas_scrapi.evals.simulation_evals.GeminiGenerate"),
+        patch("cxas_scrapi.core.apps.AgentServiceClient"),
+    ):
+        return SimulationEvals(app_name=app_name, **kwargs)
+
+
+def _passing_conv(naturalness_result: typing.Any = None) -> MagicMock:
+    conv = MagicMock()
+    conv.steps_progress = [MagicMock(status=StepStatus.COMPLETED)]
+    conv.expectation_results = []
+    conv.current_turn = 1
+    conv.get_transcript.return_value = "transcript"
+    conv.naturalness_result = naturalness_result
+    return conv
+
+
+def test_simulation_naturalness_absent_leaves_results_unchanged() -> None:
+    """Backward compatibility: no config means no naturalness keys."""
+    evals = _naturalness_evals()
+    conv = _passing_conv(naturalness_result=None)
+
+    with patch.object(evals, "simulate_conversation", return_value=conv):
+        res = evals._run_single_simulation_job(
+            tc={"name": "test"},
+            run_idx=0,
+            runs=1,
+            sim_user_model="fake",
+            eval_model="fake",
+            modality="text",
+            verbose=False,
+            parallel=1,
+        )
+
+    assert res["passed"] is True
+    assert "naturalness" not in res
+    assert "naturalness_label" not in res
+    assert "naturalness_details" not in res
+
+
+def test_simulation_naturalness_adds_result_keys() -> None:
+    evals = _naturalness_evals()
+    result = NaturalnessResult(
+        overall_score=4.1,
+        overall_label=NaturalnessLabel.HUMAN_LIKE,
+        turn_count=2,
+    )
+    conv = _passing_conv(naturalness_result=result)
+
+    with patch.object(evals, "simulate_conversation", return_value=conv):
+        res = evals._run_single_simulation_job(
+            tc={"name": "test", "naturalness_metric": True},
+            run_idx=0,
+            runs=1,
+            sim_user_model="fake",
+            eval_model="fake",
+            modality="text",
+            verbose=False,
+            parallel=1,
+        )
+
+    assert res["naturalness"] == "4.1/5"
+    assert res["naturalness_label"] == "Human-like"
+    assert res["naturalness_details"]["overall_score"] == 4.1
+    # Informational only: the simulation still passes.
+    assert res["passed"] is True
+
+
+def test_simulation_naturalness_threshold_can_fail_a_run() -> None:
+    evals = _naturalness_evals()
+    result = NaturalnessResult(
+        overall_score=2.0,
+        overall_label=NaturalnessLabel.BOT_LIKE,
+        pass_threshold=3.5,
+        passed=False,
+    )
+    conv = _passing_conv(naturalness_result=result)
+
+    with patch.object(evals, "simulate_conversation", return_value=conv):
+        res = evals._run_single_simulation_job(
+            tc={"name": "test"},
+            run_idx=0,
+            runs=1,
+            sim_user_model="fake",
+            eval_model="fake",
+            modality="text",
+            verbose=False,
+            parallel=1,
+        )
+
+    assert res["passed"] is False
+
+
+def test_simulation_naturalness_run_level_override_is_persisted() -> None:
+    """run_simulations must stash the override for monkeypatched runners."""
+    evals = _naturalness_evals()
+    assert evals.naturalness is None
+
+    with patch.object(
+        evals, "_run_single_simulation_job", return_value={"passed": True}
+    ):
+        evals.run_simulations(
+            [{"name": "test"}], runs=1, parallel=1, naturalness=True
+        )
+
+    assert evals.naturalness is True
+
+
+def test_simulation_naturalness_run_level_false_force_disables() -> None:
+    """`False` must survive as `False`, not be treated as "unset".
+
+    This is the hill-climbing switch: iterate on correctness with grading
+    off, even for test cases that declare the metric, then turn it back on.
+    """
+    evals = _naturalness_evals()
+
+    with patch.object(
+        evals, "_run_single_simulation_job", return_value={"passed": True}
+    ):
+        evals.run_simulations(
+            [{"name": "test"}], runs=1, parallel=1, naturalness=False
+        )
+
+    assert evals.naturalness is False
+    # A test case that declared the metric is still switched off by it.
+    assert (
+        parse_naturalness_config(
+            {"naturalness_metric": {"pass_threshold": 3.5}}, evals.naturalness
+        )
+        is None
+    )
+
+
+def test_simulate_conversation_skips_naturalness_when_unconfigured() -> None:
+    evals = _naturalness_evals()
+    conv = MagicMock()
+    conv.naturalness_result = None
+
+    with patch(
+        "cxas_scrapi.evals.simulation_evals.evaluate_naturalness"
+    ) as mock_eval:
+        evals._evaluate_naturalness(conv, ["User: hi"], "model", False, None)
+
+    mock_eval.assert_not_called()
+    assert conv.naturalness_result is None
