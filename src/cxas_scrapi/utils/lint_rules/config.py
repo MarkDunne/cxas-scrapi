@@ -133,7 +133,7 @@ class AgentMissingInstruction(Rule):
     ) -> list[LintResult]:
         rel = str(file_path.relative_to(context.project_root))
 
-        if file_path.name == "app.json":
+        if file_path.name == "app.json" or '"guidedAgent"' in content:
             return []
 
         agent_dir = file_path.parent
@@ -192,7 +192,7 @@ class RootAgentMissingEndSession(Rule):
             return []
 
         tools = agent_data.get("tools", [])
-        if "end_session" not in tools:
+        if "end_session" not in tools and "guidedAgent" not in agent_data:
             return [
                 self.make_result(
                     file=rel,

@@ -21,7 +21,11 @@ from unittest.mock import patch
 
 import pytest
 
-from cxas_scrapi.utils.linter import LintContext
+from cxas_scrapi.utils.lint_rules.config import (
+    AgentMissingInstruction,
+    RootAgentMissingEndSession,
+)
+from cxas_scrapi.utils.linter import LintContext, build_registry
 
 
 @pytest.fixture
@@ -1950,6 +1954,29 @@ def test_a002_missing_required_fields(
     assert any("displayName" in m for m in fields)
 
 
+_GUIDED_AGENT = {
+    "displayName": "root_agent",
+    "guidedAgent": {"configSource": {"format": "YAML"}},
+}
+
+
+def test_a004_a005_skip_guided_agent(
+    tmp_path: typing.Any, context: typing.Any
+) -> None:
+    app_json = tmp_path / "app.json"
+    app_json.write_text('{"rootAgent": "root_agent"}')
+    agent_json = tmp_path / "agents" / "root_agent" / "root_agent.json"
+    agent_json.parent.mkdir(parents=True)
+    agent_json.write_text(json.dumps(_GUIDED_AGENT))
+
+    assert not AgentMissingInstruction().check(
+        agent_json, agent_json.read_text(), context
+    )
+    assert not RootAgentMissingEndSession().check(
+        app_json, app_json.read_text(), context
+    )
+
+
 # ── Schema Rules ─────────────────────────────────────────────────────────
 
 
@@ -1998,6 +2025,16 @@ def test_v002_agent_valid(tmp_path: typing.Any, context: typing.Any) -> None:
     with patch("cxas_scrapi.utils.lint_rules.schema.json_format.ParseDict"):
         results = rule.check(agent_dir, "", context)
         assert len(results) == 0
+
+
+def test_v002_guided_agent_valid(
+    tmp_path: typing.Any, context: typing.Any
+) -> None:
+    agent_dir = tmp_path / "agents" / "root_agent"
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "root_agent.json").write_text(json.dumps(_GUIDED_AGENT))
+
+    assert not build_registry().get("V002").check(agent_dir, "", context)
 
 
 def test_v002_agent_missing_config(

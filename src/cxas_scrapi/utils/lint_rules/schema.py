@@ -296,6 +296,10 @@ class SchemaValid(Rule):
             if key.startswith("_comment_"):
                 data.pop(key)
 
+        # guidedAgent is not yet in the published ces_v1beta Agent proto.
+        if "guided_agent" not in self._proto_type.meta.fields:
+            data.pop("guidedAgent", None)
+
         if self.target == "evaluation_config":
             lower_keys = {k.lower() for k in data}
             if "turns" in lower_keys or "expectations" in lower_keys:
